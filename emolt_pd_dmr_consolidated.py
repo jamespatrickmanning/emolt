@@ -16,7 +16,9 @@ import numpy as np
 import netCDF4
 import os
 from matplotlib import pyplot as plt
-
+import warnings
+from pandas.core.common import SettingWithCopyWarning
+warnings.simplefilter(action="ignore", category=SettingWithCopyWarning)
 ##### FUNCTIONS
 def write_html_file(Sc,year,fisherman,sn):
     # writes an html file for this case (or appends to existing for this fishermen)
@@ -55,20 +57,21 @@ def write_html_file(Sc,year,fisherman,sn):
         fin.close()
         fout.close()
 ####################################
-def clean_time_series(FFR,threshold):
-      # function to clean time series record of "criteria" times the standard deviations 
+def clean_time_series(FFR,threshold,max_bad_expected):
+      # function to clean time series record of "threshold" times the standard deviations 
       # various methods of despiking are coded but, in Oct 2020, JiM hardcoded the "rolling_median" method
-      # borrowed this from "fsrs2emolt.py"
-      # 
-      # where "FFR" is the raw dataframe that has one column called "temp" and does a 30 pt rolling window check
+      # borrowed this from "fsrs2emolt.py".
+      # Input "FFR" is the raw dataframe that has one column called "temp" and does a 30 pt rolling window check
       # where it returns the same dataframe with a new columns called "temp_despiked" and "temp_roll_med"
+      # Modified by JiM in Jan 2021 to require "max_bad_expected" which might be, for example, the # of hauls that might cause a spike in the time series
       FFR['temp_roll_med']=FFR['temp'].rolling(window=30,center=True).median().fillna(method='bfill').fillna(method='ffill')
       difference=np.abs(FFR['temp']-FFR['temp_roll_med'])
       outlier_idx=difference > threshold
       FFR['temp_despiked']=FFR['temp']
       FFR['temp_despiked'][outlier_idx]=np.nan
       num_spikes=FFR.temp_despiked.isnull().sum()
-      if num_spikes>10: # likely not to happen in one season so redo with larger threshold
+      if num_spikes>max_bad_expected: # likely not to happen in one season so redo with larger threshold
+          print(str(num_spikes)+' spikes removed in 1st pass so threshold doubled')
           threshold_new=threshold*2
           outlier_idx=difference > threshold_new
           FFR['temp_despiked']=FFR['temp']
@@ -109,6 +112,11 @@ def nearlonlat_zl(lon,lat,lonp,latp): # needed for the next function get_FVCOM_b
 dirout=''
 webdir='web/'
 year=2020 #processing one year at a time
+max_bad_expected=5
+mindist_allowed=0.4# minimum distance from nearest NGDC depth in km
+threshold=3. # number of standard deviations to define a spike in the "clean_time_series" function (typically 3.0)
+
+#### MAIN CODE #######
 if year==2016:# The following three lines were the input in the MArch 2017 code
     dirout='/net/data5/jmanning/tidbit/dmr/'
     in_outputfile='/net/data5/jmanning/tidbit/dmr/2016VTSConsolidatedTemps'
@@ -120,8 +128,7 @@ elif (year==2017) | (year==2018) | (year==2019):
 elif year==2020:
     in_outputfile='2020VTSTemp_BPJ_locations'
     input_header_filename='VTS Tidbit Info 2020.csv'
-mindist_allowed=0.4# minimum distance from nearest NGDC depth in km
-threshold=3.
+
 ################################################
 
 # read input header files
@@ -158,12 +165,12 @@ if year==2017:
        'Sam Hyler':3,'Travis Otis':2,'BillyBob':2,'Ryder Noyes':3,'Justin Papkee':1,'Terry Lagasse':6,
        'Brian Tripp':1,'Jordan Drouin':9}# incremental site code for this individual determined by lookin at their sites from previous years using "select first)name,last_name from emoltdbs.emolt_site where site like 'XX%';"
 elif year==2018:    
-    inc_start={'Dustin Delano':3,'Peter Miller':3,'Trevor Jessiman':5,'Mike Dawson':14,'Josh Miller':3,\
-        'Sam Hyler':3,'Travis Otis':2,'BillyBob':2,'Ryder Noyes':3,'Justin Papkee':2,'Terry Lagasse':8,
+    inc_start={'Dustin Delano':3,'Peter Miller':3,\
+        'Travis Otis':2,'BillyBob':2,'Ryder Noyes':3,'Justin Papkee':2,'Terry Lagasse':8,
         'Brian Tripp':3,'Jordan Drouin':9}# incremental site code for this individual determined by lookin at their sites from previous years using "select first)name,last_name from emoltdbs.emolt_site where site like 'XX%';"
 elif year==2019:    
-    inc_start={'Dustin Delano':5,'Peter Miller':5,'Trevor Jessiman':5,'Mike Dawson':14,'Josh Miller':3,\
-        'Sam Hyler':3,'Travis Otis':4,'BillyBob':2,'Ryder Noyes':5,'Justin Papkee':4,'Terry Lagasse':10,
+    inc_start={'Dustin Delano':5,'Peter Miller':5,'Trevor Jessiman':5,'Mike Dawson':14,\
+        'Sam Hyler':7,'Travis Otis':4,'BillyBob':2,'Ryder Noyes':5,'Justin Papkee':4,'Terry Lagasse':10,
         'Brian Tripp':5,'Jordan Drouin':11,'Joe Locurto':1}# incremental site code for this individual determined by lookin at their sites from previous years using "select first)name,last_name from emoltdbs.emolt_site where site like 'XX%';"
 elif year==2020:    
     inc_start={'Mike Dawson':16,'Travis Otis':6,'Ryder Noyes':7,'Justin Papkee':5,'Terry Lagasse':12,
@@ -182,6 +189,11 @@ for k in range(df.VTS_SITE.count()):
   if np.isnan(df['LAT'].values[k]): # needed this in the case of one record in 2018 where Justin Papkee had no lat/lon
         continue
   [lat,lon]=dd2dm(df['LAT'].values[k],df['LON'].values[k])
+  if df['FISHER'].values[k]=='Jordan Drouin': # needed special case here to change threshold
+      threshold=1.0
+      print('changed threshold to 1.0 in Jordan case')
+  else:
+      threshold=3.0
   if df['FISHER'].values[k]=='BillyBob': 
      fn='Billy';ln='Bob'
   else:
@@ -215,7 +227,7 @@ for k in range(df.VTS_SITE.count()):
 
   # select the data for this site, clean it, and plot it
   dfds=dfd.loc[dfd['site']==int(site)]
-  dfds,num_spikes=clean_time_series(dfds,threshold)
+  dfds,num_spikes=clean_time_series(dfds,threshold,max_bad_expected)
   
   fig, ax = plt.subplots()
   dfds['temp'].plot()
@@ -223,6 +235,7 @@ for k in range(df.VTS_SITE.count()):
   plt.title(fn+' '+ln+' '+Sc+' (VTS='+site+') in '+'%0.1f'%dep+' fathoms with '+str(num_spikes)+' removed.')
   plt.xlabel('')
   plt.ylabel('degF')
+  plt.show()
   fig.savefig(webdir+'o'+Sc.lower()+Ps+'.png')
   
   
